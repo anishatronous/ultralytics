@@ -145,13 +145,41 @@ class KeypointLoss(nn.Module):
         super().__init__()
         self.sigmas = sigmas
 
+    def calculate_angle(self, p1, p2, p3):
+        """Calculate the angle (in radians) at p2 formed by vectors p2p1 and p2p3."""
+        v1 = p1 - p2  # Vector from p2 to p1
+        v2 = p3 - p2  # Vector from p2 to p3
+        cosine_angle = torch.dot(v1, v2) / (torch.norm(v1) * torch.norm(v2) + 1e-9)
+        angle = torch.acos(torch.clamp(cosine_angle, -1.0, 1.0))  # Clamp to handle numerical issues
+        return angle
+
     def forward(self, pred_kpts, gt_kpts, kpt_mask, area):
         """Calculates keypoint loss factor and Euclidean distance loss for predicted and actual keypoints."""
+
+        # Step 1: Ensure exactly 3 keypoints are predicted
+        num_pred_kpts = torch.sum(pred_kpts[..., 0] != 0, dim=1)  # Count non-zero keypoints
+        num_gt_kpts = kpt_mask.shape[1]  # Expected number of keypoints (should be 3)
+        keypoint_count_loss = 5*torch.abs(num_pred_kpts - num_gt_kpts).float().mean()
+
+        # Step 2: Calculate angular loss only if exactly 3 keypoints are predicted
+        angular_loss = 0.0
+
+        if torch.all(num_pred_kpts == 3):
+            angles_pred = self.calculate_angle(pred_kpts[:, 0], pred_kpts[:, 1], pred_kpts[:, 2])
+            angles_gt = self.calculate_angle(gt_kpts[:, 0], gt_kpts[:, 1], gt_kpts[:, 2])
+            angular_loss = torch.abs(angles_pred - angles_gt).mean()
+
+        # Step 3: Calculate Euclidean distance loss
         d = (pred_kpts[..., 0] - gt_kpts[..., 0]).pow(2) + (pred_kpts[..., 1] - gt_kpts[..., 1]).pow(2)
         kpt_loss_factor = kpt_mask.shape[1] / (torch.sum(kpt_mask != 0, dim=1) + 1e-9)
         # e = d / (2 * (area * self.sigmas) ** 2 + 1e-9)  # from formula
         e = d / ((2 * self.sigmas).pow(2) * (area + 1e-9) * 2)  # from cocoeval
-        return (kpt_loss_factor.view(-1, 1) * ((1 - torch.exp(-e)) * kpt_mask)).mean()
+        euclidean_loss = (kpt_loss_factor.view(-1, 1) * ((1 - torch.exp(-e)) * kpt_mask)).mean()
+
+        # Combine losses with prioritized weights
+        total_loss = 1.0 * keypoint_count_loss + 0.75 * angular_loss + 0.25 * euclidean_loss
+
+        return total_loss
 
 
 class v8DetectionLoss:
